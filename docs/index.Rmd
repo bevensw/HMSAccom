@@ -1,0 +1,1126 @@
+---
+title: "Mental health disabilities, stigma and access to accommodations."
+output:
+  html_document:
+    df_print: default
+editor_options:
+  chunk_output_type: inline
+---
+```{r libraries, include=FALSE}
+rm(list = ls())
+library(memisc)
+library(haven)
+library(epiDisplay)
+library(forcats)
+library(dplyr)
+library(ggplot2)
+library(interactions)
+library(tidyr)
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(table1)
+library(knitr)
+library(kableExtra)
+library(purrr)
+library(shiny)
+library(reactable)
+library(gridExtra)
+library(ggbreak)
+library(gtsummary)
+library(flextable)
+library(officer)
+library(ipw)
+library(survey)
+library(pollster)
+library(gtsummary)
+library(here)
+library(gt)
+library(ggeffects)
+library(mice)
+library(glue)
+```
+
+```{r working directory and calling our file, include=FALSE}
+df_raw <- read.csv(here("Data", "HMS2324.csv"))
+df_raw1 <- read.csv(here("Data", "HMS2223.csv"))
+```
+
+```{r working dataframe, include=FALSE}
+df <- df_raw
+```
+
+``` {r disability types, include=FALSE}
+df_disability <- df %>%
+    dplyr::select(disab_1_1:disab_1_9)
+df_disability$disabilitycom <- 0
+disab_cols <- paste0("disab_1_", 1:9)
+existing_cols <- disab_cols[disab_cols %in% names(df_disability)]
+df_disability[, existing_cols] <- lapply(df_disability[, existing_cols], function(x) {
+  x[is.na(x)] <- 0
+  return(x)
+})
+df_disability$disabilitycom <- NA_integer_
+
+for (i in seq_len(nrow(df_disability))) {
+  row_vals <- as.numeric(df_disability[i, existing_cols])
+  count_ones <- sum(row_vals == 1)
+  
+  if (count_ones == 0) {
+    df_disability$disabilitycom[i] <- 0 # None
+  } else if (count_ones > 1) {
+    df_disability$disabilitycom[i] <- 10 # Multiple
+  } else {
+    # Exactly one disability; find which one
+    df_disability$disabilitycom[i] <- which(row_vals == 1)
+  }
+}
+
+df_disability$disabilitycom <- factor(
+  df_disability$disabilitycom,
+  levels = c(0, 1:9, 10),
+  labels = c(
+    "None",
+    "Attention deficit/hyperactivity disorders",
+    "Deaf or hard of hearing",
+    "Learning disorders",
+    "Mobility impairments",
+    "Neurological disorders",
+    "Physical/health related disorders",
+    "Psychological disorder/condition",
+    "Visual impairments",
+    "Other (please specify)",
+    "Multiple disabilities"
+  )
+)
+df$disabtype <- df_disability$disabilitycom
+```
+
+``` {r stigma clean, include=FALSE}
+gender_vars <- c("gender_male", "gender_female", "gender_trans", 
+                 "gender_queer", "gender_selfID", "gender_nonbin", 
+                 "gender_prefnoresp")
+
+df[, gender_vars] <- lapply(df[, gender_vars], function(x) {
+  x[is.na(x)] <- 0
+  return(x)
+})
+
+df$genderfinal <- NA_integer_
+for (i in seq_len(nrow(df))) {
+  for (j in seq_along(gender_vars)) {
+    if (df[[gender_vars[j]]][i] == 1) {
+      df$genderfinal[i] <- j
+      break
+    }
+  }
+}
+
+df$genderfinal <- factor(df$genderfinal,
+  levels = 1:7,
+  labels = c("Male", "Female", "Genderqueer", "Non-binary",
+             "Transgender", "Prefer not to respond", "Self-identified")
+)
+
+```
+
+``` {r ethnicity, include=FALSE}
+race_vars <- c("race_black", "race_ainaan", "race_asian", "race_his", 
+               "race_pi", "race_mides", "race_white", "race_other")
+
+df[, race_vars] <- lapply(df[, race_vars], function(x) {
+  x[is.na(x)] <- 0
+  return(x)
+})
+
+df$racefinal <- NA_integer_
+
+for (i in seq_len(nrow(df))) {
+  for (j in seq_along(race_vars)) {
+    if (df[[race_vars[j]]][i] == 1) {
+      df$racefinal[i] <- j
+      break
+    }
+  }
+}
+
+df$racefinal <- factor(df$racefinal,
+  levels = 1:8,
+  labels = c("Black", "AI/AN", "Asian", "Hispanic/Latinx", 
+             "NH/PI", "Middle Eastern", "White", "Self-identified")
+)
+```
+
+``` {r other vars clean, include=FALSE}
+# relabel register accomm var
+df$disab_2 <- factor(df$disab_2,
+                     levels = c(1, 2, 3),
+                     labels = c("Yes", "No", "Prefer not to say"))
+
+## create dataframe out of those who self-identify as having a psychological disability (can have multiple disabilities)
+df_psych2 <- df %>% 
+  filter(disab_1_7==1)
+
+# clean parental education
+df <- df %>%
+  mutate(
+    educ_par1_cat = case_when(
+      educ_par1 %in% c(1, 2) ~ "No high school",
+      educ_par1 %in% c(3, 4) ~ "High school",
+      educ_par1 %in% c(5, 6, 7) ~ "College",
+      educ_par1 == 8 ~ "Don't know",
+      TRUE ~ NA_character_
+    ),
+    educ_par2_cat = case_when(
+      educ_par2 %in% c(1, 2) ~ "No high school",
+      educ_par2 %in% c(3, 4) ~ "High school",
+      educ_par2 %in% c(5, 6, 7) ~ "College",
+      educ_par2 == 8 ~ "Don't know",
+      TRUE ~ NA_character_
+    ),
+    educ_par1_num = case_when(
+      educ_par1 %in% c(1, 2) ~ 1,
+      educ_par1 %in% c(3, 4) ~ 2,
+      educ_par1 %in% c(5, 6, 7) ~ 3,
+      educ_par1 == 8 ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    educ_par2_num = case_when(
+      educ_par2 %in% c(1, 2) ~ 1,
+      educ_par2 %in% c(3, 4) ~ 2,
+      educ_par2 %in% c(5, 6, 7) ~ 3,
+      educ_par2 == 8 ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    parent_edu = factor(case_when(
+      pmax(educ_par1_num, educ_par2_num, na.rm = TRUE) == 1 ~ "No high school",
+      pmax(educ_par1_num, educ_par2_num, na.rm = TRUE) == 2 ~ "High school",
+      pmax(educ_par1_num, educ_par2_num, na.rm = TRUE) == 3 ~ "College",
+      is.na(educ_par1_num) & is.na(educ_par2_num) ~ "Don't know"
+    ), levels = c("No high school", "High school", "College", "Don't know"))
+  )
+
+```
+
+# Introduction
+Mental health disabilities have emerged as the predominant disability group across post-secondary institutions in the United States. In fact, NPSAS data suggests that the significant increase in university enrollments from students with disabilities over the last two decades is largely driven by this disability group (2020 GAO data). 
+
+Despite this, prevalence estimates of this disability group vary widely across institutions over time: 
+
+1. University of California Undergraduate Experience Survey:
+  1a. 2025 data described 30% of all students with disabilities reported a mental health disability while 54% reported a learning disability. 
+  1b. 2022 data described something different: 39% of all disabilities were mental health while only 4% reported a learning disability. 
+2. University of California, Berkeley April 2025: 2513/5680 (44%) of all students with disabilities reported a mental health disability while learning disabilities comprised of only 5%.
+3. University of Texas, Austin 2024: 2157/3885 (55.5%) of students with a disability reported a mental health disability while learning disabilities comprised of only 16%.
+4. Syracuse University 2024: Students may report more than one: 41% of all students with disabilities reported a mental health disability while 74.1% reported a learning, which included ADHD (commonly categorized as a neurodevelopmental disability. 
+5. University of Oregon 2023: 27.3% of students with disabilities reported a mental health disability while 16% ADHD or learning disability. 
+
+Some of this variation will be due to the different sociodemographics of the students who attend these very different institutions. Another significant contribution to the variability in prevalence estimates is due to the variability in the definition of what constitutes a mental health disability to researchers and university leadership, how disability service offices determine eligibility for disabilities, and the use of self-report data from students themselves. As we can see above, even within systems there exists variability, and across systems we see differences in how different diagnoses are categorized as disabilities. This can have a significant impact on the surveillance of students with mental health disabilities within the university system and can lead to severe misallocations of mental health and disability support services.^[For the purpose of this study, we adhere to the ADA definition of psychiatric (mental health/psychological) disabilities as: "a mental impairment that substantially limits one or more of the major life activities of [an] individual; a record of impairment; or being regarded as having such an impairment."] 
+
+## Service access
+Compared to other disability groups, the rising prevalence of mental health disabilities has unique consequences for service provision within institutions whereby there is an increased demand for both mental health treatment through counselling and psychological services (CAPS) and disability management through disability service offices (DSO). In this context, it is estimated that a majority of students with mental health disabilities (SMHDs) do not receive accommodations, which may be a significant contributor to poorer mental health, social and academic outcomes for these students. 
+
+Felber et al., 2020 reported on 2016/2017 Healthy Minds data that 86.7% of SMHDs in their sample who qualified for a mental health disability under the ADA reported to not having registered for accommodations. Similarly, UC systems data from 2020 and 2022 indicated that 82% and 73% of students with mental health concerns/disorders did not receive accommodations, respectively ^[One limitation with the Felber study and UC data is the claim that participants who reported that they had been diagnosed with a mental health disorder by a health professional were thus qualified under the ADA for a mental health disability. A mental health disorder diagnosis does not automatically qualify as a disability without evidence of functional limitation; a proportion of the students included in this group would not report functional limitations due to their disability. This figure of 86.7% is very likely an underestimation of the proportion of SMHDs who registered for accommodations by including students who likely are unlikely to meet the criteria of disability. As we will argue later, it is much more useful to constrain this sample to those disagnosed with a mental health disorder who also report SEVERE symptoms, which is strongly correlated with functional limitations.]. More recent data (Barnard-Brak 2022) has estimated that approximately 59% of students (n=3593) with psychological disorders were not registered for accommodations. Reductions in the percentage of these students serviced by DSOs may be a result of a reduction in the availability of services (staff to student ratios increasing), an increase in barriers to *accessing* these services (stigma, infrastructural, perceived need), or that the increased percentage of students reporting mental health disorders are presenting with 'milder' symptoms/fewer functional limitations (no evidence to suggest this). 
+
+Ultimately, the common, persistent challenge with estimating the prevalence and service access underutilization for this cohort is the lack of data on functional limitations associated with student's reporting mental health disorders. In other disability categories, functional limitations are central to how disabilities are classified and managed however, this is less discussed in research into mental health disabilities. This gap between mental health symptoms and functional limitations makes it difficult to infer on whether a reported mental health disorder 'elevates' to the level of disability, which impacts an institution's ability to allocate resources based on the needs of its students. National surveys such as the BRFSS, NHANES and the NHIS all inquire about the functional limitations alongside specific diagnoses of chronic diseases and mental health disorders. As it is already an integral part how disability service offices assess students during accommodation interviews, collection of these data alongside mental health diagnoses can better triangulate the numbers and severity of students with mental health disorders who receive accommodations within universities. 
+
+## Stigma 
+Understanding the role of disability stigma in service access for students with disabilities is critical considering it is well-established that there are differential service access rates dependent on sociocultural factors of students and the types of institutions they attend (Weis & Brittner, 2022). If students from disadvantaged gender, cultural or economic groups are more likely to experience stigma due to their disability then this will have a differential impact on how these groups access university services This is a significant equity issue in research into service access for students with disabilities whereby early intervention into stigma may disproportionately improve access for those who need the most support. Despite this, there have been few investigations into the role of stigma, be it mental health or disability stigma, and service access for students with disabilities in post-secondary education. 
+
+Previous studies have described the important role that stigma plays in self-disclosure and service access for students with disabilities. Barnard-Brak et al., 2009 reported that students who did not accept their disability were less likely to request accommodations; Marshak et al., 2010 reported from qualitative data that disability stigma was a barrier for students with disabilities in accessing accommodations. For those with mental health "issues", internalized/personal stigma was a barrier to seeking academic support and self-disclosure more broadly (Grimes 2020). For students with learning disabilities, nagative views of their disability and concerns about how other students, staff or faculty may respond to their disability negatively impacted their decision to self-disclose (Cole et al., 2015). Felber at al., 2020 explored differences in mental health treatment access between SMHDs who were and were not registered to DSOS, which showed small effect sizes for the negative association between perceived stigma and mental health treatment access. To this author's knowledge, no study has quantiatively investigated the association between stigma and disability service access in SMHDs. Barnard-Brak et al., 2020 reported positive associations between receiving therapy or taking medication (for mental health reasons), and registering with DSOs, however stigma was not included in their model.
+
+## Study aims
+This study aims to fill the gap in the service access and disability literature by exploring the association between stigma (personal and perceived) and service access (registering with DSOs or receiving mental health treatment) for students with psychological/mental health disabilities. Importantly, we build-on prior work by using a new Healthy Minds study self-reported disability group question ('Do you have a disability, or disabilities, from any of the following categories?'), as opposed to the prior year's question asking. Older HMS datasets queried disability status by asking what disability a student received an accommodation for, which constrained the entire sample of students with disabilities to those who received accommodations. Conversely, other analyses were limited by assuming that those with a diagnosed mental health disorder could be counted as those with a mental health disability, which is not necessarily true. 
+
+This analysis defines disability by combining self-identification of a disability with self-reported diagnosis of a mental health disorder, meaning our sample is unconstrained by registration with disability service office. This allows us to estimate prevalences and differences in accommodation access in relation to presence of stigma for students with psychological disabilities. Of note, our models incorporate mental health stigma rather than disability stigma (e.g., Post-Secondary Student Disability Stigma scale), which would be a novel testing of the relationship between mental health and disability management for this group [the only stigma measure available in the HMS dataset was the mental health stigma]. Few [perhaps no one?] have explored perceptions of students with mental health disorders and contextualizing their experiences within a conceptual model of disability. 
+
+This study first aims to explore **who** this population of students with disabilities are as defined by their symptom severity, functional limitations, and the association between these two. We will define a population of this disability that is consistent with ADA definitions to elucidate a relationship between mental health disability and the role of stigma in mediating their access to support services. Ultimately, this study provides clarity on who this population of students with disabilities are, an estimate of their underutilization of support services, and the impact of mental health stigma on their access of support services. 
+
+# Table 1 - Characterstics of weighted sample by disability type 
+
+We provide an overall demographic table adjusted using sampling weights provided, divided by disability type. Majority of the sample is female, white, and has a median age of 21. 
+``` {r table1, echo=FALSE, results='asis', echo=FALSE}
+# generating a weighted table 
+dfds <- svydesign(id=~1, weights=~nrweight, survey.lonely.psu = "adjust", data=df)
+
+# create total n for entire weighted sample
+total_n <- sum(weights(dfds)) %>% round()
+
+# table code
+tbl <- dfds %>%
+  tbl_svysummary(
+    include = c(age, genderfinal, racefinal, deprawsc, anx_score),
+    label = c(age ~ "Age", genderfinal = "Gender", racefinal = "Race/Ethnicity", deprawsc= "PHQ-9 score", anx_score="GAD-7 score"),
+    by = disabtype,
+    statistic = list(
+      all_continuous() ~ "{median} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    )
+  ) %>% 
+  add_overall(last = FALSE, col_label = "**Total**")
+
+cat('<div style="overflow-x: auto;">')
+print(tbl)
+cat('</div>')
+```
+
+## Students who self-identify as having a psychological disability
+
+In this dataset, mental health disability is represented by a variable called disab_1_7 that is one of a list of 9 disability types that students can select if it applies to them. We will be using the term psychological disability and mental health disability interchangeably within this paper. 
+
+Respondents are asked: Do you have a disability, or disabilities, from any of the following categories? (Select all that apply): Psychological disorder/condition.
+
+I will use this section to explore the prevalence of these students and their uniqueness compared to other groups; I will present a few datapoints to explore these students within this dataset. 
+``` {r SMHDs, echo=FALSE, results= 'asis'}
+psych_total <- df %>% filter(disab_1_7 == 1)
+
+psych_total <- psych_total %>%
+  mutate(has_other_disab = rowSums(select(., disab_1_1:disab_1_6, disab_1_8:disab_1_9) == 1, na.rm = TRUE) > 0)
+
+pct_dep_anx <- round(100 * nrow(filter(psych_total, dx_dep == 1 | dx_anx == 1)) / nrow(psych_total), 1)
+
+pct_adhd <- round(100 * nrow(filter(psych_total, dx_neurodev_1 == 1)) / nrow(psych_total), 1)
+
+pct_accom <- round(100 * nrow(filter(psych_total, disab_2 == 'Yes')) / nrow(psych_total), 1)
+
+pct_other_disab <- round(100 * mean(psych_total$has_other_disab, na.rm = TRUE), 1)
+
+glue("
+<br><br>
+<strong>Psychological disability overview:</strong>
+
+- {pct_dep_anx}% of students who report a psychological disability also report a depressive or anxiety disorder.
+- {pct_adhd}% of students who report a psychological disability also report ADHD.
+- {pct_accom}% of students who report a psychological disability receive accommodations (note: this may be for a co-occurring disability such as ADHD or vision impairment).
+- {pct_other_disab}% of students who report a psychological disability also report another type of disability.
+")
+```
+
+## Psychological disability and academic accommodations. 
+In order to get a better appreciation of how mental health/psychological disability may be impacting disability service access, it is important to remove potential counfounding from other disability groups. Using the 'psychological disability' variable as is will also include students who have selected other disabilities, which may mean the mental health disability arose secondarily to a 'primary' disability, which is common  in this population. In our case, it is useful to constrain our dataset to those who ONLY report a mental health disability absent of another. Further, we consider 'registering with disability service office' as a proxy for accessing academic accommodations.
+
+I perform two steps:
+1) I construct a dataframe restricted to those who ONLY reported  psychological disabilities; 
+2) Perform quality control by removing those who did not also report a mental health diagnosis from a professional (that would exclude them from having a possible psychological/mental health disability). This accounted for ~5% of the subsample. 
+```{r psychological disability ONLY, echo=FALSE, results='asis'}
+# Filter students with only psychological disability (no co-occurring types)
+df_psych <- df %>% 
+  filter(disab_1_7 == 1 &
+         is.na(disab_1_1) & is.na(disab_1_2) & is.na(disab_1_3) &
+         is.na(disab_1_4) & is.na(disab_1_5) & is.na(disab_1_6) &
+         is.na(disab_1_8) & is.na(disab_1_9)) 
+
+only_psych_total <- nrow(df_psych)
+
+# Count students with MH diagnoses
+mh_diagnosis_count <- df_psych %>%
+  filter(dx_dep == 1 | dx_anx == 1 | dx_bip == 1 | dx_ocd == 1 |
+         dx_trauma == 1 | dx_ea == 1 | dx_psy == 1) %>%
+  nrow()
+
+pct_mh_dx <- round(100 * mh_diagnosis_count / only_psych_total, 1)
+
+# Output 1: MH diagnosis %
+glue("
+<br><br>
+<strong>Percentage of students who report only psychological disability and have a mental health disorder diagnosis:</strong>
+
+- {pct_mh_dx}% of students who report only a psychological disability also report a mental health diagnosis.
+")
+```
+
+```{r psychological disability ONLY 2, echo=FALSE, results='asis'}
+# Filter down to only those with a diagnosis
+df_psych_dx <- df_psych %>%
+  filter(dx_dep == 1 | dx_anx == 1 | dx_bip == 1 | dx_ocd == 1 |
+         dx_trauma == 1 | dx_ea == 1 | dx_psy == 1)
+# Calculate accommodations %
+pct_accom_with_dx <- round(100 * nrow(df_psych_dx %>% filter(disab_2 == "Yes")) / nrow(df_psych_dx), 1)
+
+# Output 2: Accommodations %
+glue("
+<br><br>
+<strong>Percentage of students who report only psychological disability and have a mental health disorder diagnosis who are registered with their disability service office:</strong>
+
+- {pct_accom_with_dx}% of these students receive accommodations.
+")
+```
+
+## Mental health outcomes between general population and those with psychological disabilities
+It is also important to explore how students who only identify as having a psychological/mental health disability with a mental health diagnosis differ from the general population of those that report mental health diagnosis without a psychological/mental health disability. 
+
+I will use two mental health outcomes measures to explore this: the PHQ9 and the GAD7.
+```{r psych/mh disability subset, echo=FALSE, results='asis'}
+# Subsets for reuse
+mh_dx <- df %>% filter(dx_dep == 1 | dx_anx == 1 | dx_bip == 1 | dx_ocd == 1 |
+                       dx_trauma == 1 | dx_ea == 1 | dx_psy == 1)
+
+mh_dx_no_psych_dis <- mh_dx %>% filter(is.na(disab_1_7))
+
+# Medians
+phq9_no_psychdis <- median(mh_dx_no_psych_dis$deprawsc, na.rm = TRUE)
+phq9_only_psychdis <- median(df_psych$deprawsc, na.rm = TRUE)
+
+gad7_no_psychdis <- median(mh_dx_no_psych_dis$anx_score, na.rm = TRUE)
+gad7_only_psychdis <- median(df_psych$anx_score, na.rm = TRUE)
+
+# Output using glue
+glue("
+<br><br>
+<strong>Median PHQ-9 and GAD-7 Scores by Group:</strong>
+
+- Median PHQ-9 score (MH diagnosis, no psychological disability): {phq9_no_psychdis}
+- Median PHQ-9 score (Only psychological/mental health disability): {phq9_only_psychdis}
+<br><br>
+- Median GAD-7 score (MH diagnosis, no psychological disability): {gad7_no_psychdis}
+- Median GAD-7 score (Only psychological/mental health disability): {gad7_only_psychdis}
+")
+
+# this makes sense --> the difference between those with MH disorder and those with MH disabilities is the severity of symptoms --> functional limitations. 
+```
+
+**This makes sense:** a big difference between those with a MH disorder and those with only a psychological/mental health disability is the severity of symptoms i.e., those with psychological disabilities describe more severe mental health symptoms than those who report. 
+
+This leads us to consider the association between the severity of symptoms and disability, which should be connected mechanistically by the impact symptom severity has on *functional limitations*. Recent NHANES data demonstrated exactly this (Meshkate et al., 2025): a strong positive association between depressive symptoms as measured by the PHQ9 and functional limitations as measured by the Disability Questionnaire (measures based on activities of daily living). 
+
+## Functional limitations and disability
+
+In this context, those reporting severe symptoms from a mental health diagnosis are likely to also report functional limitations, which would qualify them as having a disability. We can first explore this within our own data using bespoke functional limitations equivalent measures included in our dataset (dep_imp & gad7_impa), which asks: "How difficult have these problems (noted above) made it for you to do your work, take care of things at home, or get along with other people?" This prompts a 4-point Likert scale response from Not at all difficult --> Extremely difficult.
+
+
+``` {r func lims, echo=FALSE, warnings=FALSE}
+# create a dataframe from those with diganosed MH disorder AND severe dep or anx symptoms
+df_psych3 <- df %>% 
+    filter(dep_maj == 1 | anx_sev == 1) %>% 
+    filter(dx_dep == 1 | dx_anx == 1 | dx_bip == 1 | dx_ocd == 1 | dx_trauma == 1 | dx_ea == 1 | dx_psy == 1)
+
+# dichotomise both impact vars into low impact on ADL (scores 1-2 i.e. not difficult and somewhat difficult) vs high impact on ADL (scores 3-4 i.e., very and extremely difficult) then sum those scores into a new variable. this is conservative (e.g., could include scores 2-4!)
+df_psych3 <- df_psych3 %>%
+  mutate(
+    dep_impa_bin = ifelse(dep_impa >= 3, 1, ifelse(dep_impa %in% 1:2, 0, NA)),
+    gad7_impa_bin = ifelse(gad7_impa >= 3, 1, ifelse(gad7_impa %in% 1:2, 0, NA)),
+    dis_impa = dep_impa_bin + gad7_impa_bin,
+    dis_impa = ifelse(dis_impa >= 1, 1, ifelse(dis_impa == 0, 0, NA))
+  )
+
+df_psych3 %>% 
+  filter(!is.na(dis_impa)) %>% 
+  group_by(dis_impa) %>% 
+  count() %>% 
+  ungroup() %>% 
+  mutate(prop = round(n / sum(n), 3),
+         label = ifelse(dis_impa == 1, "With limitations", "Without limitations")) %>% 
+  select(`Functional Limitation Status` = label, `Proportion` = prop) %>% 
+  kable(caption="<strong>Proportion of students with diagnosed MH disorder and severe symptoms who report functional limitations</strong>")
+
+df_psych3 %>% 
+  filter(!is.na(dis_impa)) %>% 
+  group_by(dis_impa, disab_1_7) %>% 
+  count() %>% 
+  ungroup() %>% 
+  mutate(
+    prop = round(n / sum(n), 3),
+    func_label = ifelse(dis_impa == 1, "With limitations", "Without limitations"),
+    disab_label = case_when(
+      is.na(disab_1_7) ~ "No",
+      disab_1_7 == 1 ~ "Yes"
+    )
+  ) %>% 
+  select(
+    `Psychological Disability Reporting` = disab_label,
+    `Functional Limitation Status` = func_label,
+    `Proportion` = prop
+  ) %>% 
+  kable(caption = "<strong>Proportion of students who report a psychological disability who report a functional limitations</strong>")
+
+df_psych3 %>% 
+  filter(dis_impa == 1) %>% 
+  group_by(disab_1_7) %>% 
+  count() %>% 
+  ungroup() %>% 
+  mutate(prop = round(n / sum(n), 3),
+         disab_label = case_when(
+           is.na(disab_1_7) ~ "No",
+           disab_1_7 == 1 ~ "Yes",
+         )) %>% 
+  select(`Psychological disability` = disab_label,
+         `Proportion` = prop) %>% 
+  kable(caption="<strong>Proportion of students with a mental health diagnosis and functional limitations who report a psychological disability</strong>")
+```
+
+Firstly, for those with both a MH diagnosis AND severe depressive or anxiety symptoms 74% report functional limitations as a result of these symptoms. Of those, only 14% reported a psychological/mental health disability and 61% did not. 3% of those *without* a functional limitation reported a psychological/mental health disability. Relatedly, 15% of students with both a MH diagnosis AND severe depressive or anxiety symptoms who reported receiving accommodations do not report any functional limitations. 
+
+Secondly, 82% of those with a MH diagnosis who reported severe depressive or anxiety symptoms that caused functional limitations do NOT report having a psychological disability. This represents a significant proportion of this sample who would be considered having a psychologica/mental health disability but do not self-identify as having one. 
+
+Of this 82%, 61% identify a non-psychological disability and so may consider the functional limitations they experience due to depression/anxiety a result of their 'primary' disability, not a psychological disability. Despite this, a significant number of students with non-psychological disabilities DO co-report a psychological/mental health disability in the presence of functional limitations related to depression/anxiety, so it is unlikely entirely explained by this.
+
+This does however, beg the question: is a mental health disorder/condition, which arises due to another disability (ADHD, dyslexia, specific learning disability) that students report as leading to functional limitations simply a symptom of their original disability, or is it its own disability? If the latter, how does this impact care? Perhaps disability care focuses on managing the functional limitations associated with the original disability (which MAY be different to the psychological disability) with the intention that downstream it will benefit the psychological/mental health disability. Perhaps disability care providers consider the management of the mental health disorders that arise from another disability within the purview of mental health providers/clinicians. There remains a lack of clarity in the management of 'secondary' psychological/mental health disabilities from this perspective.
+
+Regardless, **40% of those with functional limitations from their MH diagnosis who do not report ANY other disability, also do not report a psychological disability**. This leads us to our most conservative estimate that 4/10 students who report functional limitations due to severe mental health symptoms who are also not receiving disability care for a non-psychological disability do not self-identify as having a psychological disability despite their eligibility. This adds up to approximately 5% of this entire dataset!
+
+This access gap may be a result of unmeasured disability stigma in this group where students may recognize their mental health disorder as disabling however, feel uncomfortable referring to it as a psychological disability. It may also be a result of a lack of disability cultural competency where these students do not recognize that their mental health disorder, which is causing significant limitations in their daily activities (such as socializing or studying, attending class etc) is disabling and thus, they have a disability. 
+
+It may also relate to the use of the term psychological instead of mental health: students may be not understand that depressive or anxiety disorders are a psychological disorder/condition since mental health is the most common parlance for these terms currently. This speaks to the importance of language in the assessment, communication and delivery of disability care for these students, particularly those across different sociocultural and linguistic backgrounds.
+
+An important caveat to these data regarding unmet care needs is that respondents are required self-identify as having a disability before they can select whether they are registered with a disability service office (proxy for receiving accommodations). It is possible that there is a cohort within this sample who reported severe depressive or anxiety symptoms that caused functional limitations, who do NOT report having a psychological disability but DO receive accommodations. This would mean that they are having their disability care needs met despite not reporting a psychological disability (possibly for a different disability) and thus are not counted here as receiving accommodations.
+
+# Disability self-identification, stigma and functional limitations
+
+So, now that we understand the extent that: 
+
+1. Severe MH symptoms relate to functional limitations in this population of students with mental health diagnoses.
+2. A report of functional limitations due to their severe MH symptoms is unlikely to mean that a student identifies as having a psychological disability. 
+
+**This begs the question:** what might be the mechanism by which a student with mental health diagnoses and severe symptoms chooses to self-identify as having a psychological disability or not? This is critical a question considering that in order to access accommodations through disability services, students must self-disclose their disability, which requires a student to self-identify as *having* a psychological/mental health disability. 
+
+A priori evidence suggests that stigma is an important factor here, particularly when comparing those who report a functional limitation vs those who do not. I will run two regression with interactions between stigma (personal then perceived) and report of functional impairment (yes or no) to explore how this impacts the probability of a student with a mental health diagnoses and severe dep/anx symptoms self-identifying as having a psychological disability. 
+
+For our analyses, we only have access to mental health stigma (personal, perceived and stigma of seeking mental health treatment), not disability stigma. For students with psychological/mental health disabilities, it is likely that mental health stigma interacts with disability stigma in ways that it does not for other disability groups; in this context, would mental health stigma and disability stigma be measuring different constructs? It is possible the answer to this question is yes however, I believe there would be a strong correlation between the two.
+
+``` {r functional limitation models and plots, echo=FALSE, warning=FALSE}
+# create functional limitation var for df_psych
+df_psych3 <- df_psych3 %>%
+  mutate(
+    dep_impa_bin = ifelse(dep_impa >= 3, 1, ifelse(dep_impa %in% 1:2, 0, NA)),
+    gad7_impa_bin = ifelse(gad7_impa >= 3, 1, ifelse(gad7_impa %in% 1:2, 0, NA)),
+    dis_impa = dep_impa_bin + gad7_impa_bin,
+    dis_impa = ifelse(dis_impa >= 1, 1, ifelse(dis_impa == 0, 0, NA))
+  )
+
+# create stigma sum variable (exclude any obs that has an entry that contains NA so we don't get scores <2)
+df_psych3 <- df_psych3 %>%
+    mutate(stig_per_sum = if_else(
+        rowSums(is.na(across(c(stig_per_1, stig_per_2, stig_per_3)))) > 0,
+        NA_real_,
+        stig_per_1 + stig_per_2 + stig_per_3
+    ))
+
+## reverse code _1 and -3 stigma qs per sum score so higher score equals more stigma
+df_psych3 <- df_psych3 %>%
+    mutate(
+        stig_per_1_rev = 6 - stig_per_1,  # reverse code
+        stig_per_2_rev = stig_per_2,      # keep original
+        stig_per_3_rev = 6 - stig_per_3,  # reverse code
+        stig_per_sum_rev = if_else(
+            rowSums(is.na(across(c(stig_per_1_rev, stig_per_2_rev, stig_per_3_rev)))) > 0,
+            NA_real_,
+            stig_per_1_rev + stig_per_2_rev + stig_per_3_rev
+        )
+    )
+
+# reg model likelihood of self-id psych disability by personal stigma
+model1  <- df_psych3 %>%
+    mutate(disab_1_7 = ifelse(is.na(disab_1_7), 0, disab_1_7)) %>%
+    glm(disab_1_7 ~ stig_per_sum_rev*dis_impa + age + racefinal + genderfinal + deprawsc + anx_score, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+predictselfID <- ggpredict(model1, terms = c("stig_per_sum_rev", "dis_impa"), typical = "mode")
+
+ggplot(predictselfID, aes(x = x, y = predicted, color = factor(group, levels = c(0, 1), labels = c("No", "Yes")))) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(
+        x = "Personal Stigma",
+        y = "Predicted Prob of Pscyhological Disability Self-ID",
+        color = "Functional Impairment"
+    ) +
+    theme_bw() +
+    ylim(0, 0.5) +
+    scale_color_manual(values = c("No" = "#a2d2ff", "Yes" = "#ffafcc"))
+
+## reverse code stigma pcv sum score so higher score equals more stigma
+# create stigma sum variable (exclude any obs that has an entry that contains NA so we don't get scores <2)
+df_psych3 <- df_psych3 %>%
+    mutate(stig_pcv_sum = if_else(
+        rowSums(is.na(across(c(stig_pcv_1, stig_pcv_2, stig_pcv_3)))) > 0,
+        NA_real_,
+        stig_pcv_1 + stig_pcv_2 + stig_pcv_3
+    ))
+
+## reverse code stigma per sum score so higher score equals more stigma
+df_psych3 <- df_psych3 %>%
+    mutate(
+        stig_pcv_1_rev = 6 - stig_pcv_1,
+        stig_pcv_2_rev = stig_pcv_2,
+        stig_pcv_3_rev = 6 - stig_pcv_3,
+        stig_pcv_sum_rev = if_else(
+            rowSums(is.na(across(c(stig_pcv_1_rev, stig_pcv_2_rev, stig_pcv_3_rev)))) > 0,
+            NA_real_,
+            stig_pcv_1_rev + stig_pcv_2_rev + stig_pcv_3_rev
+        )
+    )
+
+# reg model likelihood of self-id psych disability by perceived stigma
+model2  <- df_psych3 %>%
+    mutate(disab_1_7 = ifelse(is.na(disab_1_7), 0, disab_1_7)) %>%
+    glm(disab_1_7 ~ stig_pcv_sum_rev*dis_impa + age + racefinal + genderfinal + deprawsc + anx_score, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+predictselfID2 <- ggpredict(model2, terms = c("stig_pcv_sum_rev", "dis_impa"), typical = "mode")
+
+ggplot(predictselfID2, aes(x = x, y = predicted, color = factor(group, levels = c(0, 1), labels = c("No", "Yes")))) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(
+        x = "Perceived Stigma",
+        y = "Predicted Prob of Pscyhological Disability Self-ID",
+        color = "Functional Impairment"
+    ) +
+    theme_bw() +
+    ylim(0, 0.5) +
+    scale_color_manual(values = c("No" = "#a2d2ff", "Yes" = "#ffafcc"))
+
+
+## sum score (higher score equals more stigma to access services).
+df_psych3 <- df_psych3 %>%
+    mutate(
+        stig_self_sum = if_else(
+            rowSums(is.na(across(c(stig_self_1, stig_self_2, stig_self_3)))) > 0,
+            NA_real_,
+            stig_self_1 + stig_self_2 + stig_self_3
+        )
+    )
+
+# reg model likelihood of self-id psych disability by self-stigma (SSOSH)
+model3  <- df_psych3 %>%
+    mutate(disab_1_7 = ifelse(is.na(disab_1_7), 0, disab_1_7)) %>%
+    glm(disab_1_7 ~ stig_self_sum*dis_impa + age + racefinal + genderfinal + deprawsc + anx_score, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+predictselfID3 <- ggpredict(model3, terms = c("stig_self_sum", "dis_impa"), typical = "mode")
+
+ggplot(predictselfID3, aes(x = x, y = predicted, color = factor(group, levels = c(0, 1), labels = c("No", "Yes")))) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(
+        x = "Help-Seeking Stigma",
+        y = "Predicted Prob of Pscyhological Disability Self-ID",
+        color = "Functional Impairment"
+    ) +
+    theme_bw() +
+    ylim(0, 0.5) +
+    scale_color_manual(values = c("No" = "#a2d2ff", "Yes" = "#ffafcc"))
+```
+
+From these data, there is no interaction effect for any stigma measure between those who or do not report a functional limitation and our outcome. Increasing personal and self stigma described an association with lower probability of self-identifying as having a psychological disability for those who do and do not report functional limitations. In fact, those with the lowest personal stigma scores who reported a functional limitation were almost four times more likely to self-identify a psychological disability than those with the highest stigma score (note: low basline or self-ID!). The difference between lowest and highest for help-seeking stigma scores was just under double the probability for self-identify with a psychological disability in both groups. 
+
+Perceived mental health stigma described the opposite association: higher perceived mental health stigma resulted in higher probability of self-identifying with a psychological disability. I do not know why this would be!
+
+These data are is critical as self-identification is a pre-requisite to accessing disability care in post-secondary education e.g., students need to self-disclose their disability to receive accommodations from disability service offices. If stigma is preventing self-disclosure of a disability, ipso facto stigma is preventing access to disability care. For those who do not report a functional limitation this may not be significant as they, according to the accepted ADA definition of disability, would not be eligible for disability care. However, for those who do report functional limitations, this is very important!
+
+# Stigma, and access to disability and mental health services 
+We have established an association between stigma and self-identification of psychological disability however, how does stigma also impact a student who has *already* self-identified, and their subsequent self-DISCLOSURE to disability or mental health services? 
+
+In these models, we constrain our sample to **students who ONLY reported a psychological disability** to avoid biasing our sample with those who may have received care for a co-occuring disability. We also condition our sample on those who report a mental health diagnosis as a quality control.
+
+Finally, there are modest missing data for stigma values, so we perform multiple imputations (MICE) to impute data across our variables of interest. Models would not converge with so much missing data so this was a necessary step. While this seems serious, this is just because we are treating our stigma sum scores as linear variables, and at the extreme ends there are few responses for pairwise comparisons in our regression models, particularly as we crosstab. 
+
+``` {r models, echo=FALSE, warning=FALSE}
+# weighted logistic models on whether a SMHD is likely to report having a mental health disability (when they likely have a mental health disability)
+## create func limitation variable here too
+df_psych <- df_psych %>%
+  mutate(
+    dep_impa_bin = ifelse(dep_impa >= 3, 1, ifelse(dep_impa %in% 1:2, 0, NA)),
+    gad7_impa_bin = ifelse(gad7_impa >= 3, 1, ifelse(gad7_impa %in% 1:2, 0, NA)),
+    dis_impa = dep_impa_bin + gad7_impa_bin,
+    dis_impa = ifelse(dis_impa >= 1, 1, ifelse(dis_impa == 0, 0, NA))
+  )
+
+## may have to impute to make this work - too many NAs in stigma values 
+df_psychanalysis <- df_psych %>% 
+    select(stig_per_1, stig_per_2, stig_per_3, stig_pcv_1, stig_pcv_2, stig_pcv_3, disab_2, age, racefinal, genderfinal, deprawsc, anx_score, dis_impa, nrweight, stig_self_1, stig_self_2, stig_self_3, ther_any, parent_edu)
+imp1 <- futuremice(df_psychanalysis, maxit=20)
+regimp <- complete(data=imp1, action = "long") 
+df_psych4 <- regimp
+
+## clean disab2 variable
+df_psych44 <- df_psych4 %>%
+  filter(disab_2 != "Prefer not to say") %>%
+  mutate(disab_2 = factor(disab_2, levels = c("No", "Yes")))
+
+
+# create stigma sum variable - have to exclude the NAs and reverse code q1 and 3
+df_psych4 <- df_psych4 %>%
+  mutate(
+    stig_per_1_rev = recode(stig_per_1, `6` = 1, `5` = 2, `4` = 3, `3` = 4, `2` = 5, `1` = 6),
+    stig_per_2_rev = stig_per_2,
+    stig_per_3_rev = recode(stig_per_3, `6` = 1, `5` = 2, `4` = 3, `3` = 4, `2` = 5, `1` = 6),
+    stig_per_sum_rev = if_else(
+      rowSums(is.na(across(c(stig_per_1_rev, stig_per_2_rev, stig_per_3_rev)))) > 0,
+      NA_real_,
+      stig_per_1_rev + stig_per_2_rev + stig_per_3_rev
+    )
+  )
+
+## reverse code stigma per sum score so higher score equals more stigma
+df_psych4 <- df_psych4 %>%
+  mutate(
+    stig_pcv_1_rev = recode(stig_pcv_1, `6` = 1, `5` = 2, `4` = 3, `3` = 4, `2` = 5, `1` = 6),
+    stig_pcv_2_rev = stig_pcv_2, 
+    stig_pcv_3_rev = recode(stig_pcv_3, `6` = 1, `5` = 2, `4` = 3, `3` = 4, `2` = 5, `1` = 6),
+    stig_pcv_sum_rev = if_else(
+      rowSums(is.na(across(c(stig_pcv_1_rev, stig_pcv_2_rev, stig_pcv_3_rev)))) > 0,
+      NA_real_,
+      stig_pcv_1_rev + stig_pcv_2_rev + stig_pcv_3_rev
+    )
+  )
+
+## sum score (higher score equals more stigma to access services).
+df_psych4 <- df_psych4 %>%
+    mutate(
+        stig_self_sum = if_else(
+            rowSums(is.na(across(c(stig_self_1, stig_self_2, stig_self_3)))) > 0,
+            NA_real_,
+            stig_self_1 + stig_self_2 + stig_self_3
+        )
+    )
+
+## exposure: personal stigma 'I would think less of a person who received mental health treatment'
+model1 <- df_psych4 %>%
+    filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(disab_2 ~ stig_per_sum_rev + age + racefinal + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model2  <- df_psych4 %>%
+  filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(ther_any ~ stig_per_sum_rev + age + racefinal + genderfinal + dis_impa + parent_edu, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+## exposure: perceived stigma 'Most people think less of a person who received mental health treatment'
+model3 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_pcv_sum_rev  + age + racefinal + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model4 <- df_psych4 %>% 
+  glm(ther_any ~ stig_pcv_sum_rev + age + racefinal + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+# expsoure: health seeking stigma
+model5 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_self_sum  + age + racefinal + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model6 <- df_psych4 %>%
+  glm(ther_any ~ stig_self_sum  + age + racefinal + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+```
+
+## All students with psychological disabilities
+Our first models will explore these associations over our total sample. Predicted probabilities will use 'modal' averages from our sample to demonstrate the effect of stigma on our two outcomes: registered with DSOs & mental health treatment in the previous 12 months.
+
+``` {r stigma plots unstrat 1, echo=FALSE}
+library(gridExtra)
+predictav <- ggpredict(model1, terms = c("stig_per_sum_rev"), typical = "mode")
+
+p1 <- ggplot(predictav, aes(x = x, y = predicted)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs( x = "Personal Stigma", y = NULL) +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(0, 3, 6, 9, 12, 15))
+
+predict3av <- ggpredict(model3, terms = c("stig_pcv_sum_rev"), typical = "mode")
+
+p3 <- ggplot(predict3av, aes(x = x, y = predicted)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL) +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(0, 3, 6, 9, 12, 15))
+
+predict5av <- ggpredict(model5, terms = c("stig_self_sum"), typical = "mode") 
+
+p5 <- ggplot(predict5av, aes(x = x, y = predicted)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL) +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(0, 3, 6, 9, 12, 15))
+
+predict2av <- ggpredict(model2, terms = c("stig_per_sum_rev"), typical = "mode")
+
+p2 <- ggplot(predict2av, aes(x = x, y = predicted)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Personal Stigma", y = NULL) +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(0, 3, 6, 9, 12, 15))
+
+predict4av <- ggpredict(model4, terms = c("stig_pcv_sum_rev"), typical = "mode") 
+
+p4 <- ggplot(predict4av, aes(x = x, y = predicted)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL) +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(0, 3, 6, 9, 12, 15))
+
+predict6av <- ggpredict(model6, terms = c("stig_self_sum"), typical = "mode") 
+
+p6 <- ggplot(predict6av, aes(x = x, y = predicted)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL) +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(0, 3, 6, 9, 12, 15))
+
+grid.arrange(p1, p3, p5, nrow=2, top = textGrob("Probability of registering with Disability Service Office",gp=gpar(fontsize=14,font=1)))
+
+grid.arrange(p2, p4, p6, nrow=2, top = textGrob("Probability of receiving therapy in past 12 months",gp=gpar(fontsize=14,font=1)))
+```
+
+These models suggest that once a student self-identifies as having a psychological disability, personal mental health stigma is not associated with registering with disability service offices. Intuitively, personal mental health stigma is negatively associated with receiving mental health treatment in the prior 12 months while perceived stigma describes no association. Perceived mental health stigma described a small negative association with registering with disability service offices, and no association with receiving mental health treatment in the previous 12 months. 
+
+Interestingly, mental health help-seeking stigma *is* positively associated with registering with disability service offices, and negatively associated with receiving mental health therapy over the last 12 months. This will be a consistent finding across all sub-group analyses too! ^[May seem obvious but worth discussing the difference between personal stigma and help-seeking stigma here as they appear quite similar at the question-level: personal seems to assess a respondent's stigma towards the idea of mental health while help-seeking assesses stigma towards seeking help for a mental health problem]
+
+## Effect modification by race/ethnicity
+Does stigma's association with accessing disability services or mental health treatment depend on racial/ethnic identity?
+
+The cell sizes in our sample get far too small to accurately model all relationships between racial/ethnic groups so while we will include them in our model (and interpret them cautiously), we will only plot groups with sufficient sample sizes (even still, sample sizes are small for the extreme values of stigma, so we should also explore these cautiously).
+
+``` {r stigma models and plots race, echo=FALSE, warning=FALSE}
+df_psych4 <- df_psych4 %>%
+  mutate(racefinal = relevel(factor(racefinal), ref = "White"))
+
+model1 <- df_psych4 %>%
+    filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(disab_2 ~ stig_per_sum_rev*racefinal + age + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model2  <- df_psych4 %>%
+  filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(ther_any ~ stig_per_sum_rev*racefinal + age + genderfinal + dis_impa + parent_edu, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+## exposure: perceived stigma 'Most people think less of a person who received mental health treatment'
+model3 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_pcv_sum_rev*racefinal  + age + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model4 <- df_psych4 %>% 
+  glm(ther_any ~ stig_pcv_sum_rev*racefinal + age + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model5 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_self_sum*racefinal  + age + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model6 <- df_psych4 %>%
+  glm(ther_any ~ stig_self_sum*racefinal  + age + genderfinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+predictav <- ggpredict(model1, terms = c("stig_per_sum_rev", "racefinal")) %>% filter(group %in% c("White", "Black", "Asian", "Hispanic/Latinx"))
+
+p1 <- ggplot(predictav, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(
+        x = "Personal Stigma", y = NULL, group = "Race/Ethnicity") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict2av <- ggpredict(model2, terms = c("stig_per_sum_rev", "racefinal")) %>% filter(group %in% c("White", "Black", "Asian", "Hispanic/Latinx"))
+
+p2 <- ggplot(predict2av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Personal Stigma", y = NULL, group = "Race/Ethnicity") +
+    theme_bw() +
+    ylim(0, 1)  +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict3av <- ggpredict(model3, terms = c("stig_pcv_sum_rev", "racefinal")) %>% filter(group %in% c("White", "Black", "Asian", "Hispanic/Latinx"))
+
+p3 <- ggplot(predict3av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL, group="Race/Ethnicity") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict4av <- ggpredict(model4, terms = c("stig_pcv_sum_rev", "racefinal")) %>% filter(group %in% c("White", "Black", "Asian", "Hispanic/Latinx"))
+
+p4 <- ggplot(predict4av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL, group="Race/Ethnicity") +
+    theme_bw() +
+    ylim(0, 1)  +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict5av <- ggpredict(model5, terms = c("stig_self_sum", "racefinal")) %>% filter(group %in% c("White", "Black", "Asian", "Hispanic/Latinx"))
+
+p5 <- ggplot(predict5av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL, group="Race/Ethnicity") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15))
+
+predict6av <- ggpredict(model6, terms = c("stig_self_sum", "racefinal")) %>% filter(group %in% c("White", "Black", "Asian", "Hispanic/Latinx"))
+
+p6 <- ggplot(predict6av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL, group="Race/Ethnicity") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15))
+
+grid.arrange(p1, p3, p5, nrow=2, top = textGrob("Probability of registering with DSOs by race/ethnicity",gp=gpar(fontsize=14,font=1)))
+grid.arrange(p2, p4, p6, nrow=2, top = textGrob("Probability of receiving therapy in past 12 months\n by race/ethnicity",gp=gpar(fontsize=14,font=1)))
+```
+Interaction effects for personal mental health stigma were only significant for Hispanic/Latinx students, indicating that for them increasing personal stigma was associated with increased probability of registering with DSOs compared to White students (reference group). For perceived stigma, students who reported Black or Asian were less likely to register with DSOs compared to White students as perceived stigma increased. Hispanic/Latinx students more likely to register with DSOs compared to White students as help-seeking stigma increased, while all groups described positive association. 
+
+Black students were significantly less likely to seek mental health treatment in the last 12 months due to increasing personal stigma compared to White students. This was not true for Hispanic/Latinx students who described no association. Students who reported White and Asian were similarly less likely to receive mental health treatment as personal mental health stigma increased. Students who reported Asian were more likely to receive mental health treatment in the last 12 months due to increasing perceived mental health stigma compared to White students. No other groups reported an association. All groups except those reporting Hispanic/Latinx described a decreasing association between help-seeking stigma and receiving mental health treatment in the last 12 months. 
+
+## Effect modification by gender
+Does stigma's association with accessing disability services or mental health treatment depend on gender?
+
+Similar to above, our sample size is limited and therefore, we limit our visualizations to gender groups with sufficient numbers to make reasonable inferences.
+
+``` {r stigma models and plots gender, echo=FALSE, warning=FALSE}
+df_psych4 <- df_psych4 %>%
+  mutate(genderfinal = relevel(factor(genderfinal), ref = "Female"))
+
+## exposure: personal stigma 'I would think less of a person who received mental health treatment'
+model1 <- df_psych4 %>%
+    filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(disab_2 ~ stig_per_sum_rev*genderfinal + age + racefinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model2  <- df_psych4 %>%
+  filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(ther_any ~ stig_per_sum_rev*genderfinal + age + racefinal + dis_impa + parent_edu, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+## exposure: perceived stigma 'Most people think less of a person who received mental health treatment'
+model3 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_pcv_sum_rev*genderfinal + age + racefinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model4 <- df_psych4 %>% 
+  glm(ther_any ~ stig_pcv_sum_rev*genderfinal + age + racefinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+# expsoure: health seeking stigma
+model5 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_self_sum*genderfinal  + age + racefinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model6 <- df_psych4 %>%
+  glm(ther_any ~ stig_self_sum*genderfinal  + age + racefinal + dis_impa + parent_edu, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+#plots
+
+predictav <- ggpredict(model1, terms = c("stig_per_sum_rev", "genderfinal")) %>% filter(group %in% c("Male", "Female"))
+
+p1 <- ggplot(predictav, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(
+        x = "Personal Stigma", y = NULL, group = "Gender") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict2av <- ggpredict(model2, terms = c("stig_per_sum_rev", "genderfinal")) %>% filter(group %in% c("Male", "Female"))
+
+p2 <- ggplot(predict2av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Personal Stigma", y = NULL, group = "Gender") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict3av <- ggpredict(model3, terms = c("stig_pcv_sum_rev", "genderfinal")) %>% filter(group %in% c("Male", "Female"))
+
+p3 <- ggplot(predict3av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL, group="Gender") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict4av <- ggpredict(model4, terms = c("stig_pcv_sum_rev", "genderfinal")) %>% filter(group %in% c("Male", "Female"))
+
+p4 <- ggplot(predict4av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL, group="Gender") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict5av <- ggpredict(model5, terms = c("stig_self_sum", "genderfinal")) %>% filter(group %in% c("Male", "Female"))
+
+p5 <- ggplot(predict5av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL, group="Gender") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15))
+
+predict6av <- ggpredict(model6, terms = c("stig_self_sum", "genderfinal")) %>% filter(group %in% c("Male", "Female"))
+
+p6 <- ggplot(predict6av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL, group="Gender") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15))
+
+grid.arrange(p1, p3, p5, nrow=2, top = textGrob("Probability of registering with DSOs by gender",gp=gpar(fontsize=14,font=1)))
+grid.arrange(p2, p4, p6, nrow=2, top = textGrob("Probability of receiving therapy in past 12 month\n by gender",gp=gpar(fontsize=14,font=1)))
+```
+Increasing disability stigma had opposite associations with registering for disability service offices between males and females. At the lowest stigma values, males were more likely than females to register with disability services and this increased to almost double at the highest stigma values. Similar was reported for perceived stigma however, the association of help-seeking stigma described no differences between genders on registering with DSOs but both groups described increasing probability of registering with DSOs with increasing help-seeking stigma. 
+
+While increasing personal stigma for females was associated with small decreases in probability of receiving mental health treatment in the prior 12 months, the effect of personal stigma was much more significant. At the highest level of disability stigma, there was a 52-percent difference in the probability between males and females. At the lowest stigma values males were very slightly [significant p-value] more likely to have received mental health care in the previous 12 months however, at the highest level this dropped to 0.33 probability. Help-seeking stigma described a similar negative association with receiving mental health treatment in the previous 12 months for both groups. 
+
+## Effect modification by parental education
+Does stigma's association with accessing disability services or mental health treatment depend on parental education? 
+
+Here we draw on the relationship between parental education and socioeconomic status, which is not directly measured in this dataset. While this association is not perfectly correlated, parental education is a **strong** predictor of socioeconomic status in the US, and we theorize that there will also be an independent effect of parental education on service access through cultural competency/knowledge of service by students who's parents have previously attended a college or university. 
+
+Similar to prior plots, we have categorized parental education into four levels, and dropped those who responded 'Don't know' from our visualizations. 
+
+``` {r stigma plots parental ed, echo=FALSE, warning=FALSE}
+df_psych4 <- df_psych4 %>%
+  mutate(parent_edu = relevel(factor(parent_edu), ref = "No high school"))
+
+## exposure: personal stigma 'I would think less of a person who received mental health treatment'
+model1 <- df_psych4 %>%
+    filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(disab_2 ~ stig_per_sum_rev*parent_edu + age + racefinal + genderfinal + dis_impa, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model2  <- df_psych4 %>%
+  filter(!is.na(stig_per_sum_rev)) %>% 
+    glm(ther_any ~ stig_per_sum_rev*parent_edu + age + racefinal + genderfinal + dis_impa, data = .,, family = binomial(link = "logit"), weights = nrweight)
+
+## exposure: perceived stigma 'Most people think less of a person who received mental health treatment'
+model3 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_pcv_sum_rev*parent_edu  + age + racefinal + genderfinal + dis_impa, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model4 <- df_psych4 %>% 
+  glm(ther_any ~ stig_pcv_sum_rev*parent_edu + age + racefinal + genderfinal + dis_impa, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+# expsoure: health seeking stigma
+model5 <- df_psych4 %>%
+  filter(disab_2!="Prefer not to say") %>%
+  glm(disab_2 ~ stig_self_sum*parent_edu  + age + racefinal + genderfinal + dis_impa, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+model6 <- df_psych4 %>%
+  glm(ther_any ~ stig_self_sum*parent_edu  + age + racefinal + genderfinal + dis_impa, data = ., family = binomial(link = "logit"), weights = nrweight)
+
+# plotting
+
+predictav <- ggpredict(model1, terms = c("stig_per_sum_rev", "parent_edu")) %>% filter(group %in% c("No high school", "High school", "College"))
+
+p1 <- ggplot(predictav, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(
+        x = "Personal Stigma", y = NULL, group = "Parental education") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict2av <- ggpredict(model2, terms = c("stig_per_sum_rev", "parent_edu")) %>% filter(group %in% c("No high school", "High school", "College"))
+
+p2 <- ggplot(predict2av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Personal Stigma", y = NULL, group = "Parental education") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict3av <- ggpredict(model3, terms = c("stig_pcv_sum_rev", "parent_edu")) %>% filter(group %in% c("No high school", "High school", "College"))
+
+p3 <- ggplot(predict3av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL, group="Parental education") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict4av <- ggpredict(model4, terms = c("stig_pcv_sum_rev", "parent_edu")) %>% filter(group %in% c("No high school", "High school", "College"))
+
+p4 <- ggplot(predict4av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Perceived Stigma", y = NULL, group="Parental education") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18))
+
+predict5av <- ggpredict(model5, terms = c("stig_self_sum", "parent_edu")) %>% filter(group %in% c("No high school", "High school", "College"))
+
+p5 <- ggplot(predict5av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL, group="Parental education") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15))
+
+predict6av <- ggpredict(model6, terms = c("stig_self_sum", "parent_edu")) %>% filter(group %in% c("No high school", "High school", "College"))
+
+p6 <- ggplot(predict6av, aes(x = x, y = predicted, color=group, fill=group)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+    geom_line() +
+    labs(x = "Help-Seeking Stigma", y = NULL, group="Parental education") +
+    theme_bw() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = c(3, 6, 9, 12, 15))
+
+grid.arrange(p1, p3, p5, nrow=2, top = textGrob("Probability of registering with DSOs by\n parental education",gp=gpar(fontsize=14,font=1)))
+grid.arrange(p2, p4, p6, nrow=2, top = textGrob("Probability of receiving therapy in past 12 month\n by parental education",gp=gpar(fontsize=14,font=1)))
+```
+At the lowest stigma values for all three measures, students who reported that neither parent had a high school degree were the least likely to register with the disability service office. The positive interaction effects for this group also described that increasing personal and help-seeking stigma had a greater positive association with registering compared to other groups.
+
+Conversely, at the lowest stigma values for all three measures, students who reported that neither parent had a high school degree were the most likely to report receiving mental health treatment in the prior 12 months compared to other groups. Increasing personal stigma was associated with decreased mental health treatment access for all group however, students who reported that neither parent had a high school degree described a greater decrease as stigma increased compared to the other groups. Similar to gender and race/ethnic groups, increased help-seeking stigma was associated with a decreased probability of receiving mental health treatment in the prior 12 months.
+
+# References
+Stigma measures: Eisenberg et al., 2009 (https://websites.umich.edu/~daneis/papers/hmpapers/Stigma%20_Eisenberg%20et%20al%202009_.pdf)
+
+``` {r unused, include=FALSE}
+# those who reported functional limitations but no disability who report other disabilities 
+df_psych3 %>%
+  filter(dis_impa == 1, is.na(disab_1_7)) %>%
+  summarise(
+    selectedotherdisability = sum(
+      rowSums(across(disab_1_1:disab_1_6) == 1, na.rm = TRUE) > 0 |
+      rowSums(across(disab_1_8:disab_1_9) == 1, na.rm = TRUE) > 0
+    ),
+    total = n()
+  )
+```
